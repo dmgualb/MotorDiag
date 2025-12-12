@@ -355,6 +355,26 @@ class MotorDiagWindow(QMainWindow):
         if y0_data or y1_data or y2_data:
             self.ax.legend()
         
+        # Calculate and display statistics for Y0 and Y1
+        stats_text = ""
+        if y0_data:
+            y0_min = min(y0_data)
+            y0_max = max(y0_data)
+            y0_amp = y0_max - y0_min
+            stats_text += f"Y0: Min={y0_min:.2f}  Max={y0_max:.2f}  Amp={y0_amp:.2f}\n"
+        
+        if y1_data:
+            y1_min = min(y1_data)
+            y1_max = max(y1_data)
+            y1_amp = y1_max - y1_min
+            stats_text += f"Y1: Min={y1_min:.2f}  Max={y1_max:.2f}  Amp={y1_amp:.2f}"
+        
+        # Display statistics text below the plot
+        if stats_text:
+            self.figure.text(0.15, 0.02, stats_text, fontsize=9, 
+                           verticalalignment='bottom', family='monospace',
+                           bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        
         self.canvas.draw()
 
 
