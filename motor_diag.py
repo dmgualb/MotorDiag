@@ -116,6 +116,10 @@ class MotorDiagWindow(QMainWindow):
         self.ac_toggle_btn.clicked.connect(self.toggle_ac)
         bottom_layout.addWidget(self.ac_toggle_btn)
         
+        self.copy_btn = QPushButton("Copy Table")
+        self.copy_btn.clicked.connect(self.copy_table_to_clipboard)
+        bottom_layout.addWidget(self.copy_btn)
+        
         bottom_layout.addStretch()
         main_layout.addLayout(bottom_layout)
         
@@ -237,6 +241,32 @@ class MotorDiagWindow(QMainWindow):
                     print("Failed to enable AC")
         except Exception as e:
             print(f"Error toggling AC: {e}")
+    
+    def copy_table_to_clipboard(self):
+        """Copy table data to clipboard in tab-separated format"""
+        try:
+            # Build tab-separated text
+            rows = []
+            # Add header
+            headers = []
+            for col in range(self.table.columnCount()):
+                headers.append(self.table.horizontalHeaderItem(col).text())
+            rows.append("\t".join(headers))
+            
+            # Add data rows
+            for row in range(self.table.rowCount()):
+                row_data = []
+                for col in range(self.table.columnCount()):
+                    item = self.table.item(row, col)
+                    row_data.append(item.text() if item and item.text() else "")
+                rows.append("\t".join(row_data))
+            
+            # Copy to clipboard
+            clipboard_text = "\n".join(rows)
+            QApplication.clipboard().setText(clipboard_text)
+            print("Table copied to clipboard")
+        except Exception as e:
+            print(f"Error copying table: {e}")
     
     def receive_data_response(self, column_index):
         """
