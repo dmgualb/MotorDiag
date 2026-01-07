@@ -2,7 +2,7 @@ import sys
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QComboBox, QPushButton, QTableWidget, 
                                QTableWidgetItem, QSplitter)
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread, Signal
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import serial.tools.list_ports
@@ -12,12 +12,87 @@ import serial_ctrl
 BAUDRATE = 57600  # Serial port baudrate
 
 
+class DataReaderThread(QThread):
+    """Thread for reading serial data without blocking the UI"""
+    data_received = Signal(int, list)  # Signal(column_index, list of values)
+    error_occurred = Signal(str)  # Signal(error_message)
+    
+    def __init__(self, serial_ctrl, column_index):
+        super().__init__()
+        self.serial_ctrl = serial_ctrl
+        self.column_index = column_index
+        
+    def run(self):
+        """Read data from serial port in background thread"""
+        try:
+            values = []
+            
+            # Receive 20 blocks of data
+            for block_num in range(20):
+                # Expected header for this block
+                expected_header = f"<{block_num:02d}:"
+                
+                # Check for block header
+                if not self.serial_ctrl.CheckResponse(expected_header):
+                    self.serial_ctrl.ReceiveAvailableMessage(quiet=True)
+                    self.error_occurred.emit(f"Expected header '{expected_header}' not received. Operation aborted.")
+                    return
+                
+                # Read 10 hex values (40 characters: 10 values * 4 chars each)
+                hex_data = self.serial_ctrl.ReceiveMessageBySize(40, timeout_ms=25, quiet=True)
+                
+                # Check if the message only contains hexadecimal characters
+                if not all(c in "0123456789ABCDEFabcdef" for c in hex_data):
+                    self.serial_ctrl.ReceiveAvailableMessage(quiet=True)
+                    self.error_occurred.emit(f"Non-hexadecimal data received in block {block_num}. Operation aborted.")
+                    return
+
+                if len(hex_data) != 40:
+                    self.serial_ctrl.ReceiveAvailableMessage(quiet=True)
+                    self.error_occurred.emit(f"Incomplete data in block {block_num}. Expected 40 characters, got {len(hex_data)}. Operation aborted.")
+                    return
+                
+                # Check for closing '>'
+                closing_char = self.serial_ctrl.ReceiveMessageBySize(1, timeout_ms=25, quiet=True)
+                if closing_char != '>':
+                    self.serial_ctrl.ReceiveAvailableMessage(quiet=True)
+                    self.error_occurred.emit(f"Expected '>' at end of block {block_num}, got '{closing_char}'. Operation aborted.")
+                    return
+                
+                # Parse the 10 hex values
+                for value_idx in range(10):
+                    # Extract 4-character hex value
+                    hex_value = hex_data[value_idx * 4:(value_idx * 4) + 4]
+                    
+                    # Convert to signed 16-bit integer
+                    unsigned_value = int(hex_value, 16)
+                    # Convert to signed (two's complement)
+                    if unsigned_value >= 0x8000:
+                        signed_value = unsigned_value - 0x10000
+                    else:
+                        signed_value = unsigned_value
+                    
+                    values.append(signed_value)
+            
+            # Emit signal with all received data
+            self.data_received.emit(self.column_index, values)
+            
+        except ValueError as e:
+            self.serial_ctrl.ReceiveAvailableMessage(quiet=True)
+            self.error_occurred.emit(f"Error parsing hex data: {e}. Operation aborted.")
+        except Exception as e:
+            self.serial_ctrl.ReceiveAvailableMessage(quiet=True)
+            self.error_occurred.emit(f"Error receiving data: {e}. Operation aborted.")
+
+
 class MotorDiagWindow(QMainWindow):
     """Main window for Motor Diagnostics application"""
     
     def __init__(self):
         super().__init__()
         self.serial_ctrl = None
+        self.ax2 = None  # Secondary axis for Y2
+        self.reader_thread = None  # Thread for reading serial data
         self.init_ui()
         
     def init_ui(self):
@@ -49,9 +124,6 @@ class MotorDiagWindow(QMainWindow):
         top_layout.addWidget(self.connect_btn)
         
         top_layout.addStretch()
-        
-        # Set initial button style
-        self.update_connection_ui(False)
         main_layout.addLayout(top_layout)
         
         # Middle section: Table and Plot side by side
@@ -126,6 +198,9 @@ class MotorDiagWindow(QMainWindow):
         # Track AC state (True = enabled, False = disabled)
         self.ac_enabled = True
         
+        # Set initial button style (after all buttons are created)
+        self.update_connection_ui(False)
+        
         # Initial port refresh
         self.refresh_ports()
         
@@ -163,11 +238,19 @@ class MotorDiagWindow(QMainWindow):
             self.connect_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
             self.port_combo.setEnabled(False)
             self.refresh_btn.setEnabled(False)
+            self.read_y0_btn.setEnabled(True)
+            self.read_y1_btn.setEnabled(True)
+            self.read_y2_btn.setEnabled(True)
+            self.ac_toggle_btn.setEnabled(True)
         else:
             self.connect_btn.setText("Connect")
             self.connect_btn.setStyleSheet("background-color: #CCCCCC;")
             self.port_combo.setEnabled(True)
             self.refresh_btn.setEnabled(True)
+            self.read_y0_btn.setEnabled(False)
+            self.read_y1_btn.setEnabled(False)
+            self.read_y2_btn.setEnabled(False)
+            self.ac_toggle_btn.setEnabled(False)
     
     def read_y0(self):
         """Read Y0 data from serial port"""
@@ -175,11 +258,22 @@ class MotorDiagWindow(QMainWindow):
             print("Not connected to serial port")
             return
         
+        # Don't start a new read if one is already in progress
+        if self.reader_thread and self.reader_thread.isRunning():
+            print("Data read already in progress")
+            return
+        
         try:
             # Clean buffer before sending command
             self.serial_ctrl.ReceiveAvailableMessage(quiet=True)
             self.serial_ctrl.SendString("<GV:0>")
-            self.receive_data_response(0)  # Column 1 for Y0
+            
+            # Start background thread to read data
+            self.reader_thread = DataReaderThread(self.serial_ctrl, 0)
+            self.reader_thread.data_received.connect(self.on_data_received)
+            self.reader_thread.error_occurred.connect(self.on_error_occurred)
+            self.reader_thread.start()
+            print("Reading Y0 data...")
         except Exception as e:
             print(f"Error reading Y0: {e}")
         
@@ -189,11 +283,22 @@ class MotorDiagWindow(QMainWindow):
             print("Not connected to serial port")
             return
         
+        # Don't start a new read if one is already in progress
+        if self.reader_thread and self.reader_thread.isRunning():
+            print("Data read already in progress")
+            return
+        
         try:
             # Clean buffer before sending command
             self.serial_ctrl.ReceiveAvailableMessage(quiet=True)
             self.serial_ctrl.SendString("<GV:1>")
-            self.receive_data_response(1)  # Column 2 for Y1
+            
+            # Start background thread to read data
+            self.reader_thread = DataReaderThread(self.serial_ctrl, 1)
+            self.reader_thread.data_received.connect(self.on_data_received)
+            self.reader_thread.error_occurred.connect(self.on_error_occurred)
+            self.reader_thread.start()
+            print("Reading Y1 data...")
         except Exception as e:
             print(f"Error reading Y1: {e}")
         
@@ -203,11 +308,22 @@ class MotorDiagWindow(QMainWindow):
             print("Not connected to serial port")
             return
         
+        # Don't start a new read if one is already in progress
+        if self.reader_thread and self.reader_thread.isRunning():
+            print("Data read already in progress")
+            return
+        
         try:
             # Clean buffer before sending command
             self.serial_ctrl.ReceiveAvailableMessage(quiet=True)
             self.serial_ctrl.SendString("<GV:2>")
-            self.receive_data_response(2)  # Column 3 for Y2
+            
+            # Start background thread to read data
+            self.reader_thread = DataReaderThread(self.serial_ctrl, 2)
+            self.reader_thread.data_received.connect(self.on_data_received)
+            self.reader_thread.error_occurred.connect(self.on_error_occurred)
+            self.reader_thread.start()
+            print("Reading Y2 data...")
         except Exception as e:
             print(f"Error reading Y2: {e}")
     
@@ -268,87 +384,47 @@ class MotorDiagWindow(QMainWindow):
         except Exception as e:
             print(f"Error copying table: {e}")
     
-    def receive_data_response(self, column_index):
+    def on_data_received(self, column_index, values):
         """
-        Receive data response from serial port and populate the table column
+        Callback when data is received from background thread
         
         Args:
             column_index: The column to populate (0=Y0, 1=Y1, 2=Y2)
+            values: List of 200 integer values
         """
-        print(f"Waiting for response for column Y{column_index}...")
-        
         try:
-            # Receive 20 blocks of data
-            for block_num in range(20):
-                # Expected header for this block
-                expected_header = f"<{block_num:02d}:"
-                
-                # Check for block header
-                if not self.serial_ctrl.CheckResponse(expected_header):
-                    self.serial_ctrl.ReceiveAvailableMessage(quiet=True)  # Clean buffer
-                    print(f"Error: Expected header '{expected_header}' not received. Operation aborted.")
-                    return
-                
-                # Read 10 hex values (40 characters: 10 values * 4 chars each)
-                hex_data = self.serial_ctrl.ReceiveMessageBySize(40, timeout_ms=25, quiet=True)
-                
-                # Check if the message only contanins hexadecimal characters
-                if not all(c in "0123456789ABCDEFabcdef" for c in hex_data):
-                    self.serial_ctrl.ReceiveAvailableMessage(quiet=True)  # Clean buffer
-                    print(f"Error: Non-hexadecimal data received in block {block_num}. Operation aborted.")
-                    return
-
-                if len(hex_data) != 40:
-                    self.serial_ctrl.ReceiveAvailableMessage(quiet=True)  # Clean buffer
-                    print(f"Error: Incomplete data in block {block_num}. Expected 40 characters, got {len(hex_data)}. Operation aborted.")
-                    return
-                
-                # Check for closing '>'
-                closing_char = self.serial_ctrl.ReceiveMessageBySize(1, timeout_ms=25, quiet=True)
-                if closing_char != '>':
-                    self.serial_ctrl.ReceiveAvailableMessage(quiet=True)  # Clean buffer
-                    print(f"Error: Expected '>' at end of block {block_num}, got '{closing_char}'. Operation aborted.")
-                    return
-                
-                # Parse the 10 hex values and populate table
-                try:
-                    for value_idx in range(10):
-                        # Extract 4-character hex value
-                        hex_value = hex_data[value_idx * 4:(value_idx * 4) + 4]
-                        
-                        # Convert to signed 16-bit integer
-                        unsigned_value = int(hex_value, 16)
-                        # Convert to signed (two's complement)
-                        if unsigned_value >= 0x8000:
-                            signed_value = unsigned_value - 0x10000
-                        else:
-                            signed_value = unsigned_value
-                        
-                        # Calculate row in table (block_num * 10 + value_idx)
-                        row = block_num * 10 + value_idx
-                        
-                        # Populate table cell (column_index + 1 because column 0 is X)
-                        self.table.setItem(row, column_index + 1, QTableWidgetItem(str(signed_value)))
-                        
-                except ValueError as e:
-                    self.serial_ctrl.ReceiveAvailableMessage(quiet=True)  # Clean buffer
-                    print(f"Error parsing hex data in block {block_num}: {e}. Operation aborted.")
-                    return
+            # Populate table cells
+            for row, value in enumerate(values):
+                self.table.setItem(row, column_index + 1, QTableWidgetItem(str(value)))
             
             print(f"Successfully received all data for Y{column_index}")
             # Update the plot with new data
             self.update_plot()
             
         except Exception as e:
-            self.serial_ctrl.ReceiveAvailableMessage(quiet=True)  # Clean buffer
-            print(f"Error receiving data: {e}. Operation aborted.")
-            return
+            print(f"Error populating table: {e}")
+    
+    def on_error_occurred(self, error_message):
+        """
+        Callback when error occurs in background thread
+        
+        Args:
+            error_message: The error message
+        """
+        print(f"Error: {error_message}")
     
     def update_plot(self):
         """Update the matplotlib plot with current data"""
         self.ax.clear()
+        
+        # Clear secondary axis if it exists
+        if self.ax2 is not None:
+            self.ax2.clear()
+            self.ax2.remove()
+            self.ax2 = None
+        
         self.ax.set_xlabel('X')
-        self.ax.set_ylabel('Y')
+        self.ax.set_ylabel('Y0 / Y1', color='black')
         self.ax.set_title('Motor Data')
         self.ax.grid(True)
         
@@ -374,16 +450,30 @@ class MotorDiagWindow(QMainWindow):
                 if y2_item and y2_item.text():
                     y2_data.append(float(y2_item.text()))
         
-        # Plot data
+        # Plot Y0 and Y1 on the primary axis (left)
+        lines = []
+        labels = []
         if y0_data:
-            self.ax.plot(x_data[:len(y0_data)], y0_data, 'b-', label='Y0')
+            line, = self.ax.plot(x_data[:len(y0_data)], y0_data, 'b-', label='Y0')
+            lines.append(line)
+            labels.append('Y0')
         if y1_data:
-            self.ax.plot(x_data[:len(y1_data)], y1_data, 'r-', label='Y1')
-        if y2_data:
-            self.ax.plot(x_data[:len(y2_data)], y2_data, 'g-', label='Y2')
+            line, = self.ax.plot(x_data[:len(y1_data)], y1_data, 'r-', label='Y1')
+            lines.append(line)
+            labels.append('Y1')
         
-        if y0_data or y1_data or y2_data:
-            self.ax.legend()
+        # Create secondary axis for Y2 if it has data
+        if y2_data:
+            self.ax2 = self.ax.twinx()
+            line, = self.ax2.plot(x_data[:len(y2_data)], y2_data, 'g-', label='Y2')
+            self.ax2.set_ylabel('Y2', color='g')
+            self.ax2.tick_params(axis='y', labelcolor='g')
+            lines.append(line)
+            labels.append('Y2')
+        
+        # Create combined legend
+        if lines:
+            self.ax.legend(lines, labels, loc='upper left')
         
         # Calculate and display statistics for Y0 and Y1
         stats_text = ""
@@ -401,9 +491,9 @@ class MotorDiagWindow(QMainWindow):
         
         # Display statistics text below the plot
         if stats_text:
-            self.figure.text(0.15, 0.02, stats_text, fontsize=9, 
+            self.figure.text(0.05, 0.02, stats_text, fontsize=9, 
                            verticalalignment='bottom', family='monospace',
-                           bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+                           bbox=dict(boxstyle='round', facecolor='wheat', alpha=1.0))
         
         self.canvas.draw()
 
