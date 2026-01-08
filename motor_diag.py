@@ -92,6 +92,8 @@ class MotorDiagWindow(QMainWindow):
         super().__init__()
         self.serial_ctrl = None
         self.ax2 = None  # Secondary axis for Y2
+        self.ax3 = None  # Secondary axis for Y3
+        self.ax4 = None  # Secondary axis for Y4
         self.reader_thread = None  # Thread for reading serial data
         self.init_ui()
         
@@ -130,20 +132,22 @@ class MotorDiagWindow(QMainWindow):
         middle_splitter = QSplitter(Qt.Horizontal)
         
         # Create table (1/3 width)
-        self.table = QTableWidget(200, 4)
-        self.table.setHorizontalHeaderLabels(['X', 'Y0', 'Y1', 'Y2'])
+        self.table = QTableWidget(200, 6)
+        self.table.setHorizontalHeaderLabels(['X', 'Y0', 'Y1', 'Y2', 'Y3', 'Y4'])
         
         # Hide the row index column
         self.table.verticalHeader().setVisible(False)
         
         # Set column widths to ensure all columns are visible
         self.table.setColumnWidth(0, 40)   # X column
-        self.table.setColumnWidth(1, 80)   # Y0 column
-        self.table.setColumnWidth(2, 80)   # Y1 column
-        self.table.setColumnWidth(3, 80)   # Y2 column
+        self.table.setColumnWidth(1, 60)   # Y0 column
+        self.table.setColumnWidth(2, 60)   # Y1 column
+        self.table.setColumnWidth(3, 60)   # Y2 column
+        self.table.setColumnWidth(4, 60)   # Y3 column
+        self.table.setColumnWidth(5, 60)   # Y4 column
         
-        # Set minimum width to show all columns (40+80+80+80 + scrollbar ~20 + margins)
-        self.table.setMinimumWidth(320)
+        # Set minimum width to show all columns (40+60+60+60+60+60 + scrollbar ~20 + margins)
+        self.table.setMinimumWidth(40+60*5 + 20 + 20)
         
         # Pre-fill X column with values 0-199
         for row in range(200):
@@ -184,9 +188,21 @@ class MotorDiagWindow(QMainWindow):
         self.read_y2_btn.clicked.connect(self.read_y2)
         bottom_layout.addWidget(self.read_y2_btn)
         
+        self.read_y3_btn = QPushButton("Read Y3")
+        self.read_y3_btn.clicked.connect(self.read_y3)
+        bottom_layout.addWidget(self.read_y3_btn)
+        
+        self.read_y4_btn = QPushButton("Read Y4")
+        self.read_y4_btn.clicked.connect(self.read_y4)
+        bottom_layout.addWidget(self.read_y4_btn)
+        
         self.ac_toggle_btn = QPushButton("Disable AC")
         self.ac_toggle_btn.clicked.connect(self.toggle_ac)
         bottom_layout.addWidget(self.ac_toggle_btn)
+        
+        self.fill_speed_btn = QPushButton("Fill Speed")
+        self.fill_speed_btn.clicked.connect(self.fill_speed)
+        bottom_layout.addWidget(self.fill_speed_btn)
         
         self.copy_btn = QPushButton("Copy Table")
         self.copy_btn.clicked.connect(self.copy_table_to_clipboard)
@@ -241,7 +257,10 @@ class MotorDiagWindow(QMainWindow):
             self.read_y0_btn.setEnabled(True)
             self.read_y1_btn.setEnabled(True)
             self.read_y2_btn.setEnabled(True)
+            self.read_y3_btn.setEnabled(True)
+            self.read_y4_btn.setEnabled(True)
             self.ac_toggle_btn.setEnabled(True)
+            self.fill_speed_btn.setEnabled(True)
         else:
             self.connect_btn.setText("Connect")
             self.connect_btn.setStyleSheet("background-color: #CCCCCC;")
@@ -250,7 +269,10 @@ class MotorDiagWindow(QMainWindow):
             self.read_y0_btn.setEnabled(False)
             self.read_y1_btn.setEnabled(False)
             self.read_y2_btn.setEnabled(False)
+            self.read_y3_btn.setEnabled(False)
+            self.read_y4_btn.setEnabled(False)
             self.ac_toggle_btn.setEnabled(False)
+            self.fill_speed_btn.setEnabled(False)
     
     def read_y0(self):
         """Read Y0 data from serial port"""
@@ -327,6 +349,56 @@ class MotorDiagWindow(QMainWindow):
         except Exception as e:
             print(f"Error reading Y2: {e}")
     
+    def read_y3(self):
+        """Read Y3 data from serial port"""
+        if not self.serial_ctrl or not self.serial_ctrl.IsConnected():
+            print("Not connected to serial port")
+            return
+        
+        # Don't start a new read if one is already in progress
+        if self.reader_thread and self.reader_thread.isRunning():
+            print("Data read already in progress")
+            return
+        
+        try:
+            # Clean buffer before sending command
+            self.serial_ctrl.ReceiveAvailableMessage(quiet=True)
+            self.serial_ctrl.SendString("<GV:3>")
+            
+            # Start background thread to read data
+            self.reader_thread = DataReaderThread(self.serial_ctrl, 3)
+            self.reader_thread.data_received.connect(self.on_data_received)
+            self.reader_thread.error_occurred.connect(self.on_error_occurred)
+            self.reader_thread.start()
+            print("Reading Y3 data...")
+        except Exception as e:
+            print(f"Error reading Y3: {e}")
+    
+    def read_y4(self):
+        """Read Y4 data from serial port"""
+        if not self.serial_ctrl or not self.serial_ctrl.IsConnected():
+            print("Not connected to serial port")
+            return
+        
+        # Don't start a new read if one is already in progress
+        if self.reader_thread and self.reader_thread.isRunning():
+            print("Data read already in progress")
+            return
+        
+        try:
+            # Clean buffer before sending command
+            self.serial_ctrl.ReceiveAvailableMessage(quiet=True)
+            self.serial_ctrl.SendString("<GV:4>")
+            
+            # Start background thread to read data
+            self.reader_thread = DataReaderThread(self.serial_ctrl, 4)
+            self.reader_thread.data_received.connect(self.on_data_received)
+            self.reader_thread.error_occurred.connect(self.on_error_occurred)
+            self.reader_thread.start()
+            print("Reading Y4 data...")
+        except Exception as e:
+            print(f"Error reading Y4: {e}")
+    
     def toggle_ac(self):
         """Toggle AC enable/disable"""
         if not self.serial_ctrl or not self.serial_ctrl.IsConnected():
@@ -357,6 +429,23 @@ class MotorDiagWindow(QMainWindow):
                     print("Failed to enable AC")
         except Exception as e:
             print(f"Error toggling AC: {e}")
+    
+    def fill_speed(self):
+        """Send Fill Speed command"""
+        if not self.serial_ctrl or not self.serial_ctrl.IsConnected():
+            print("Not connected to serial port")
+            return
+        
+        try:
+            # Clean buffer before sending command
+            self.serial_ctrl.ReceiveAvailableMessage(quiet=True)
+            success = self.serial_ctrl.SendFixedCommandRetry("<FS>", "<FS>", 2)
+            if success:
+                print("Fill Speed command sent successfully")
+            else:
+                print("Failed to send Fill Speed command")
+        except Exception as e:
+            print(f"Error sending Fill Speed: {e}")
     
     def copy_table_to_clipboard(self):
         """Copy table data to clipboard in tab-separated format"""
@@ -417,11 +506,19 @@ class MotorDiagWindow(QMainWindow):
         """Update the matplotlib plot with current data"""
         self.ax.clear()
         
-        # Clear secondary axis if it exists
+        # Clear all secondary axes if they exist
         if self.ax2 is not None:
             self.ax2.clear()
             self.ax2.remove()
             self.ax2 = None
+        if self.ax3 is not None:
+            self.ax3.clear()
+            self.ax3.remove()
+            self.ax3 = None
+        if self.ax4 is not None:
+            self.ax4.clear()
+            self.ax4.remove()
+            self.ax4 = None
         
         self.ax.set_xlabel('X')
         self.ax.set_ylabel('Y0 / Y1', color='black')
@@ -433,12 +530,16 @@ class MotorDiagWindow(QMainWindow):
         y0_data = []
         y1_data = []
         y2_data = []
+        y3_data = []
+        y4_data = []
         
         for row in range(self.table.rowCount()):
             x_item = self.table.item(row, 0)
             y0_item = self.table.item(row, 1)
             y1_item = self.table.item(row, 2)
             y2_item = self.table.item(row, 3)
+            y3_item = self.table.item(row, 4)
+            y4_item = self.table.item(row, 5)
             
             if x_item and x_item.text():
                 x_data.append(float(x_item.text()))
@@ -449,6 +550,10 @@ class MotorDiagWindow(QMainWindow):
                     y1_data.append(float(y1_item.text()))
                 if y2_item and y2_item.text():
                     y2_data.append(float(y2_item.text()))
+                if y3_item and y3_item.text():
+                    y3_data.append(float(y3_item.text()))
+                if y4_item and y4_item.text():
+                    y4_data.append(float(y4_item.text()))
         
         # Plot Y0 and Y1 on the primary axis (left)
         lines = []
@@ -462,7 +567,8 @@ class MotorDiagWindow(QMainWindow):
             lines.append(line)
             labels.append('Y1')
         
-        # Create secondary axis for Y2 if it has data
+        # Create secondary axes for Y2, Y3, Y4 if they have data
+        # Y2 uses standard twinx (right side)
         if y2_data:
             self.ax2 = self.ax.twinx()
             line, = self.ax2.plot(x_data[:len(y2_data)], y2_data, 'g-', label='Y2')
@@ -470,6 +576,34 @@ class MotorDiagWindow(QMainWindow):
             self.ax2.tick_params(axis='y', labelcolor='g')
             lines.append(line)
             labels.append('Y2')
+        
+        # Y3 uses twinx with spine offset to the right
+        if y3_data:
+            self.ax3 = self.ax.twinx()
+            self.ax3.spines['right'].set_position(('outward', 60))
+            line, = self.ax3.plot(x_data[:len(y3_data)], y3_data, 'm-', label='Y3')
+            self.ax3.set_ylabel('Y3', color='m')
+            self.ax3.tick_params(axis='y', labelcolor='m')
+            lines.append(line)
+            labels.append('Y3')
+        
+        # Y4 uses twinx with spine offset further to the right
+        if y4_data:
+            self.ax4 = self.ax.twinx()
+            self.ax4.spines['right'].set_position(('outward', 120))
+            line, = self.ax4.plot(x_data[:len(y4_data)], y4_data, 'c-', label='Y4')
+            self.ax4.set_ylabel('Y4', color='c')
+            self.ax4.tick_params(axis='y', labelcolor='c')
+            lines.append(line)
+            labels.append('Y4')
+        
+        # Adjust layout to make room for multiple y-axes
+        if y4_data:
+            self.figure.subplots_adjust(right=0.67)  # Make room for Y4
+        elif y3_data:
+            self.figure.subplots_adjust(right=0.82)  # Make room for Y3
+        else:
+            self.figure.subplots_adjust(right=0.90)
         
         # Create combined legend
         if lines:
